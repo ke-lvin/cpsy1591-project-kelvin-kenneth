@@ -509,12 +509,12 @@ def run_panel_render():
     plotter.add_text("Shading Only (Shape A)", font_size=15)
     actor_shading = plotter.add_mesh(
         surf_shading,
-        color=(0.93, 0.93, 0.93),
+        color="white",
         smooth_shading=True,
-        ambient=0.12,
-        diffuse=0.82,
-        specular=0.10,
-        specular_power=24,
+        ambient=0.14,
+        diffuse=0.86,
+        specular=0.28,
+        specular_power=35,
         show_scalar_bar=False,
     )
     light_shading = configure_fixed_light(plotter)
@@ -544,10 +544,10 @@ def run_panel_render():
         cmap=BW_CMAP,
         clim=[0, 1],
         smooth_shading=True,
-        ambient=0.12,
-        diffuse=0.82,
-        specular=0.10,
-        specular_power=24,
+        ambient=0.14,
+        diffuse=0.86,
+        specular=0.28,
+        specular_power=35,
         show_scalar_bar=False,
     )
     light_both = configure_fixed_light(plotter)
@@ -556,13 +556,12 @@ def run_panel_render():
     def set_shading_strength(value):
         t = float(np.clip(value, 0.0, 1.0))
         for actor in (actor_shading, actor_both):
-            # Keep a matte/plastic range to avoid clipped white regions.
-            actor.prop.ambient = 0.26 - 0.20 * t
-            actor.prop.diffuse = 0.54 + 0.34 * t
-            actor.prop.specular = 0.015 + 0.085 * t
-            actor.prop.specular_power = 10.0 + 28.0 * t
+            actor.prop.ambient = 0.55 - 0.40 * t
+            actor.prop.diffuse = 0.35 + 0.55 * t
+            actor.prop.specular = 0.05 + 0.30 * t
+            actor.prop.specular_power = 10.0 + 70.0 * t
         for light in (light_shading, light_both):
-            light.intensity = 0.50 + 0.55 * t
+            light.intensity = 0.35 + 1.25 * t
         plotter.render()
 
     plotter.add_slider_widget(
@@ -688,10 +687,10 @@ def run_interactive_view():
         cmap=BW_CMAP,
         clim=[0, 1],
         smooth_shading=True,
-        ambient=0.12,
-        diffuse=0.82,
-        specular=0.10,
-        specular_power=24,
+        ambient=0.15,
+        diffuse=0.85,
+        specular=0.25,
+        specular_power=30,
         show_scalar_bar=False,
     )
     light = configure_fixed_light(plotter)
@@ -699,11 +698,11 @@ def run_interactive_view():
     def set_shading_strength(value):
         # 0 -> flatter lighting, 1 -> stronger shape-from-shading cues
         t = float(np.clip(value, 0.0, 1.0))
-        actor.prop.ambient = 0.26 - 0.20 * t
-        actor.prop.diffuse = 0.54 + 0.34 * t
-        actor.prop.specular = 0.015 + 0.085 * t
-        actor.prop.specular_power = 10.0 + 28.0 * t
-        light.intensity = 0.50 + 0.55 * t
+        actor.prop.ambient = 0.55 - 0.40 * t
+        actor.prop.diffuse = 0.35 + 0.55 * t
+        actor.prop.specular = 0.05 + 0.30 * t
+        actor.prop.specular_power = 10.0 + 70.0 * t
+        light.intensity = 0.35 + 1.25 * t
         plotter.render()
 
     plotter.add_slider_widget(

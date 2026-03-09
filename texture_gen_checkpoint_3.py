@@ -380,45 +380,16 @@ def configure_fixed_light(plotter):
     return light
 
 
-def make_conflicting_surface_pair(theta_res=300, phi_res=300):
-    """
-    Build two same-topology surfaces with intentionally different geometry:
-    - surface A drives shading
-    - surface B defines where texture dots live
-    Texture can then be transferred exactly by vertex index.
-    """
-    surf_a = make_perturbed_sphere(seed=5, theta_res=theta_res, phi_res=phi_res, amp=0.13)
-    surf_b = make_perturbed_sphere(seed=29, theta_res=theta_res, phi_res=phi_res, amp=0.13)
-
-    # Rotate + mirror + shear texture source so texture gradients disagree strongly.
-    rot = np.array(
-        [
-            [0.15, 0.25, 0.96],
-            [0.98, -0.08, -0.18],
-            [0.12, 0.96, -0.24],
-        ],
-        dtype=np.float32,
-    )
-    pts = surf_b.points @ rot.T
-    pts[:, 0] *= -1.0
-    pts[:, 1] *= -1.0
-    pts[:, 2] += 0.18 * pts[:, 0] * pts[:, 1]
-    pts /= np.max(np.linalg.norm(pts, axis=1))
-    surf_b.points = pts
-
-    if surf_a.n_points != surf_b.n_points:
-        raise RuntimeError("Conflicting surfaces must have matching point counts for exact transfer.")
-    return surf_a, surf_b
-
-
 def run_panel_render():
-    # Conflicting cues:
-    # - shading from surface A
-    # - dots generated on surface B coordinates
-    # - dot values transferred exactly to surface A by matching vertex indices
-    surf_shading, surf_texture = make_conflicting_surface_pair(theta_res=300, phi_res=300)
+    # Base conflicting-cue setup:
+    # - shading is driven by this displayed mesh
+    # - texture is generated from a different latent mesh with same topology
+    surf_shading = make_perturbed_sphere(seed=5, theta_res=300, phi_res=300, amp=0.13)
+    surf_texture = make_perturbed_sphere(seed=23, theta_res=300, phi_res=300, amp=0.13)
+    surf_texture.points[:, 0] *= -1.0  # mirror to strengthen disagreement
+
     points_shading = surf_shading.points
-    points_texture_target = surf_texture.points
+    points_texture = surf_texture.points
 
     def texture_strength_to_count(texture_strength):
         # 0 -> sparse (weaker cue), 1 -> dense (stronger cue)
@@ -426,21 +397,12 @@ def run_panel_render():
         return int(round(120 + 220 * t))
 
     # Random non-overlapping center sampling each update (non-grid, no fixed anchors).
-    n_pts = points_shading.shape[0]
+    n_pts = points_texture.shape[0]
     rng = np.random.default_rng(1234)
     dot_radius = 0.078
     edge_softness = 0.010
-    # Strict non-overlap (including soft edges).
-    min_center_dist = 2.08 * (dot_radius + edge_softness)
-    texture_coords = points_texture_target.copy()
-
-    def set_conflict_geometry(conflict_strength):
-        t = float(np.clip(conflict_strength, 0.0, 1.0))
-        # Amplify high-end conflict so "1.0" is visibly stronger than linear blend.
-        alpha = 1.35 * (t**0.9)
-        blended = (1.0 - alpha) * points_shading + alpha * points_texture_target
-        blended /= np.max(np.linalg.norm(blended, axis=1))
-        texture_coords[:] = blended
+    # Keep dots very close but still non-overlapping.
+    min_center_dist = 1.9 * (dot_radius + edge_softness)
 
     def sample_random_nonoverlap_centers(k, min_center_dist):
         min_dist2 = float(min_center_dist**2)
@@ -453,7 +415,7 @@ def run_panel_render():
                 break
             candidate_count = min(n_pts, max(4000, 28 * need))
             cand_idx = rng.choice(n_pts, size=candidate_count, replace=False)
-            candidates = texture_coords[cand_idx]
+            candidates = points_texture[cand_idx]
             for c in candidates:
                 if not selected:
                     selected.append(c)
@@ -466,7 +428,7 @@ def run_panel_render():
                     break
 
         if not selected:
-            return texture_coords[rng.choice(n_pts, size=1, replace=False)]
+            return points_texture[rng.choice(n_pts, size=1, replace=False)]
         centers = np.asarray(selected, dtype=np.float32)
 
         # Safety cleanup: strictly enforce non-overlap.
@@ -489,7 +451,7 @@ def run_panel_render():
         center_chunk = 64
         for c0 in range(0, centers.shape[0], center_chunk):
             c1 = min(c0 + center_chunk, centers.shape[0])
-            d = texture_coords[:, None, :] - centers[None, c0:c1, :]
+            d = points_texture[:, None, :] - centers[None, c0:c1, :]
             d2 = np.sum(d * d, axis=2)
             min_d2 = np.minimum(min_d2, np.min(d2, axis=1))
         d = np.sqrt(min_d2)
@@ -509,12 +471,12 @@ def run_panel_render():
     plotter.add_text("Shading Only (Shape A)", font_size=15)
     actor_shading = plotter.add_mesh(
         surf_shading,
-        color=(0.93, 0.93, 0.93),
+        color="white",
         smooth_shading=True,
-        ambient=0.12,
-        diffuse=0.82,
-        specular=0.10,
-        specular_power=24,
+        ambient=0.14,
+        diffuse=0.86,
+        specular=0.28,
+        specular_power=35,
         show_scalar_bar=False,
     )
     light_shading = configure_fixed_light(plotter)
@@ -544,10 +506,10 @@ def run_panel_render():
         cmap=BW_CMAP,
         clim=[0, 1],
         smooth_shading=True,
-        ambient=0.12,
-        diffuse=0.82,
-        specular=0.10,
-        specular_power=24,
+        ambient=0.14,
+        diffuse=0.86,
+        specular=0.28,
+        specular_power=35,
         show_scalar_bar=False,
     )
     light_both = configure_fixed_light(plotter)
@@ -556,13 +518,12 @@ def run_panel_render():
     def set_shading_strength(value):
         t = float(np.clip(value, 0.0, 1.0))
         for actor in (actor_shading, actor_both):
-            # Keep a matte/plastic range to avoid clipped white regions.
-            actor.prop.ambient = 0.26 - 0.20 * t
-            actor.prop.diffuse = 0.54 + 0.34 * t
-            actor.prop.specular = 0.015 + 0.085 * t
-            actor.prop.specular_power = 10.0 + 28.0 * t
+            actor.prop.ambient = 0.55 - 0.40 * t
+            actor.prop.diffuse = 0.35 + 0.55 * t
+            actor.prop.specular = 0.05 + 0.30 * t
+            actor.prop.specular_power = 10.0 + 70.0 * t
         for light in (light_shading, light_both):
-            light.intensity = 0.50 + 0.55 * t
+            light.intensity = 0.35 + 1.25 * t
         plotter.render()
 
     plotter.add_slider_widget(
@@ -575,10 +536,9 @@ def run_panel_render():
     )
     set_shading_strength(0.65)
 
-    tex_state = {"strength": 0.62, "conflict": 1.0}
+    tex_state = {"strength": 0.62}
 
     def update_texture():
-        set_conflict_geometry(tex_state["conflict"])
         tex_new = compute_texture(tex_state["strength"])
         textured["tex"] = tex_new
         plotter.render()
@@ -587,26 +547,13 @@ def run_panel_render():
         tex_state["strength"] = float(value)
         update_texture()
 
-    def set_conflict_strength(value):
-        tex_state["conflict"] = float(value)
-        update_texture()
-
     plotter.add_slider_widget(
         callback=set_texture_strength,
         rng=[0.0, 1.0],
         value=tex_state["strength"],
         title="Texture Strength",
-        pointa=(0.34, 0.10),
-        pointb=(0.60, 0.10),
-        interaction_event="end",
-    )
-    plotter.add_slider_widget(
-        callback=set_conflict_strength,
-        rng=[0.0, 1.0],
-        value=tex_state["conflict"],
-        title="Conflict Strength",
-        pointa=(0.66, 0.10),
-        pointb=(0.94, 0.10),
+        pointa=(0.48, 0.10),
+        pointb=(0.84, 0.10),
         interaction_event="end",
     )
     update_texture()
@@ -688,10 +635,10 @@ def run_interactive_view():
         cmap=BW_CMAP,
         clim=[0, 1],
         smooth_shading=True,
-        ambient=0.12,
-        diffuse=0.82,
-        specular=0.10,
-        specular_power=24,
+        ambient=0.15,
+        diffuse=0.85,
+        specular=0.25,
+        specular_power=30,
         show_scalar_bar=False,
     )
     light = configure_fixed_light(plotter)
@@ -699,11 +646,11 @@ def run_interactive_view():
     def set_shading_strength(value):
         # 0 -> flatter lighting, 1 -> stronger shape-from-shading cues
         t = float(np.clip(value, 0.0, 1.0))
-        actor.prop.ambient = 0.26 - 0.20 * t
-        actor.prop.diffuse = 0.54 + 0.34 * t
-        actor.prop.specular = 0.015 + 0.085 * t
-        actor.prop.specular_power = 10.0 + 28.0 * t
-        light.intensity = 0.50 + 0.55 * t
+        actor.prop.ambient = 0.55 - 0.40 * t
+        actor.prop.diffuse = 0.35 + 0.55 * t
+        actor.prop.specular = 0.05 + 0.30 * t
+        actor.prop.specular_power = 10.0 + 70.0 * t
+        light.intensity = 0.35 + 1.25 * t
         plotter.render()
 
     plotter.add_slider_widget(
