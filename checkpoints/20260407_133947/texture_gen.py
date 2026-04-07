@@ -934,9 +934,6 @@ def compute_true_cross_section_depths(
         shading = np.interp(u_query, u_a, depth_a).astype(np.float32)
         texture = np.interp(u_query, u_b, depth_b).astype(np.float32)
 
-    shading = _force_equal_anchor_depths(shading)
-    texture = _force_equal_anchor_depths(texture)
-
     return {
         "probe_v": float(v_target),
         "shading_depth_near_with_anchors": shading.tolist(),
@@ -947,55 +944,6 @@ def compute_true_cross_section_depths(
 def _format_depth_values(values):
     arr = np.asarray(values, dtype=np.float32).reshape(-1)
     return "[" + ", ".join(f"{float(v):.6f}" for v in arr.tolist()) + "]"
-
-
-def _force_equal_anchor_depths(depth_values):
-    """
-    Ensure left/right anchor depths are exactly equal by averaging endpoints.
-    """
-    arr = np.asarray(depth_values, dtype=np.float32).reshape(-1)
-    if arr.size >= 2:
-        edge_mean = np.float32(0.5 * (float(arr[0]) + float(arr[-1])))
-        arr[0] = edge_mean
-        arr[-1] = edge_mean
-    return arr
-
-
-def enforce_equal_left_right_edge_depths(mesh, camera, n_v_bins=220):
-    """
-    Modify mesh depth (w) so left/right contour depths match at each camera-space row.
-    Silhouette remains unchanged because only w is edited.
-    """
-    cam_pos, focal, view_up = camera
-    uvw = _points_to_camera_coords(mesh.points, cam_pos, focal, view_up).astype(np.float32)
-    prof = _edge_depth_profiles_by_v(uvw, n_bins=n_v_bins)
-
-    v_ref = prof["v"]
-    desired_w = (0.5 * (prof["left_w"] + prof["right_w"])).astype(np.float32)
-    delta_left = (desired_w - prof["left_w"]).astype(np.float32)
-    delta_right = (desired_w - prof["right_w"]).astype(np.float32)
-
-    u_pts = uvw[:, 0]
-    v_pts = uvw[:, 1]
-    left_u_v = np.interp(v_pts, v_ref, prof["left_u"]).astype(np.float32)
-    right_u_v = np.interp(v_pts, v_ref, prof["right_u"]).astype(np.float32)
-    left_d_v = np.interp(v_pts, v_ref, delta_left).astype(np.float32)
-    right_d_v = np.interp(v_pts, v_ref, delta_right).astype(np.float32)
-
-    denom = np.maximum(1e-6, right_u_v - left_u_v)
-    t = np.clip((u_pts - left_u_v) / denom, 0.0, 1.0).astype(np.float32)
-    delta = ((1.0 - t) * left_d_v + t * right_d_v).astype(np.float32)
-
-    out = uvw.copy()
-    out[:, 2] += delta
-
-    left_idx = np.asarray(prof["left_idx"], dtype=np.int64)
-    right_idx = np.asarray(prof["right_idx"], dtype=np.int64)
-    out[left_idx, 2] = np.interp(out[left_idx, 1], v_ref, desired_w).astype(np.float32)
-    out[right_idx, 2] = np.interp(out[right_idx, 1], v_ref, desired_w).astype(np.float32)
-
-    mesh.points = _camera_coords_to_points(out, cam_pos, focal, view_up)
-    return mesh
 
 
 def enforce_matching_edge_depths(reference_mesh, target_mesh, camera, n_v_bins=220):
@@ -1263,14 +1211,9 @@ def make_conflicting_surface_pair(theta_res=300, phi_res=300, fixed_camera=None,
         )
         # Re-enforce silhouette after depth edits (numerical safety).
         surf_b = enforce_same_front_silhouette(surf_a, surf_b, fixed_camera)
-        # Geometric constraint: each surface should have equal left/right contour depth.
-        surf_a = enforce_equal_left_right_edge_depths(surf_a, fixed_camera, n_v_bins=220)
-        surf_b = enforce_equal_left_right_edge_depths(surf_b, fixed_camera, n_v_bins=220)
         # Geometric constraint: match left/right contour depths between cues so
         # cross-section anchors are truly equal in the generated surfaces.
         surf_b = enforce_matching_edge_depths(surf_a, surf_b, fixed_camera, n_v_bins=220)
-        # Re-apply symmetry after cross-cue matching to suppress tiny numerical drift.
-        surf_b = enforce_equal_left_right_edge_depths(surf_b, fixed_camera, n_v_bins=220)
         surf_b = enforce_same_front_silhouette(surf_a, surf_b, fixed_camera)
 
     if surf_a.n_points != surf_b.n_points:

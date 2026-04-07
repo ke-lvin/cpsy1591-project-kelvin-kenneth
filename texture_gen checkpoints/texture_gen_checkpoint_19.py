@@ -16,7 +16,6 @@ Optional free-view panel (legacy behavior; panel 2/3 dots need not align):
 
 import argparse
 from datetime import datetime
-import json
 from pathlib import Path
 import numpy as np
 import pyvista as pv
@@ -35,8 +34,6 @@ PANEL_ROTATION_ENABLED = True
 # Controls how different shapes A and B are in panel mode while preserving silhouette.
 # 0.0 -> very similar depth; 1.0 -> clear difference; >1.0 -> stronger separation.
 PANEL_SHAPE_DIFF_STRENGTH = 1.35
-TASK_PROBE_SEED = 1234
-TASK_DEPTH_GRID_ROWS = 29
 
 
 # -----------------------------
@@ -431,27 +428,6 @@ def apply_shading_style(actor, lights, strength):
     lights["bounce"].intensity = 0.05 + 0.05 * k
 
 
-def _set_actor_lighting(actor, enabled):
-    """
-    Robust actor lighting toggle across VTK/PyVista variants.
-    """
-    flag = bool(enabled)
-    prop = getattr(actor, "prop", None)
-    if prop is None:
-        return
-    if hasattr(prop, "lighting"):
-        try:
-            prop.lighting = flag
-            return
-        except Exception:
-            pass
-    if hasattr(prop, "SetLighting"):
-        try:
-            prop.SetLighting(flag)
-        except Exception:
-            pass
-
-
 def enable_gi_approx(plotter):
     """
     Enable the best available GI approximation in this VTK build.
@@ -508,534 +484,6 @@ def enforce_same_front_silhouette(reference_mesh, target_mesh, camera):
     out[:, 1] = ref_uvw[:, 1]
 
     # Keep absolute scale unchanged so the rendered silhouette stays matched.
-    target_mesh.points = _camera_coords_to_points(out, cam_pos, focal, view_up)
-    return target_mesh
-
-
-def _edge_depth_profiles_by_v(uvw, n_bins=220):
-    """
-    Sample left/right contour depth profiles over camera-space v.
-    Returns smoothed profiles and representative contour indices.
-    """
-    uvw = np.asarray(uvw, dtype=np.float32)
-    u = uvw[:, 0]
-    v = uvw[:, 1]
-    w = uvw[:, 2]
-    n_bins = int(np.clip(n_bins, 32, 1200))
-
-    v_min = float(np.min(v))
-    v_max = float(np.max(v))
-    v_grid = np.linspace(v_min, v_max, n_bins, dtype=np.float32)
-    span = max(1e-6, v_max - v_min)
-    half_band = max(1e-6, 1.6 * (span / max(1, n_bins - 1)))
-
-    left_u = np.empty(n_bins, dtype=np.float32)
-    right_u = np.empty(n_bins, dtype=np.float32)
-    left_w = np.empty(n_bins, dtype=np.float32)
-    right_w = np.empty(n_bins, dtype=np.float32)
-    left_idx = np.empty(n_bins, dtype=np.int64)
-    right_idx = np.empty(n_bins, dtype=np.int64)
-
-    n_pts = v.shape[0]
-    fallback_k = min(n_pts, 512)
-    for i, vc in enumerate(v_grid):
-        idx = np.flatnonzero(np.abs(v - float(vc)) <= half_band)
-        if idx.size < 48:
-            # Robust fallback for sparse rows.
-            idx = np.argpartition(np.abs(v - float(vc)), fallback_k - 1)[:fallback_k]
-
-        uu = u[idx]
-        j_left = int(idx[int(np.argmin(uu))])
-        j_right = int(idx[int(np.argmax(uu))])
-        left_idx[i] = j_left
-        right_idx[i] = j_right
-        left_u[i] = u[j_left]
-        right_u[i] = u[j_right]
-        left_w[i] = w[j_left]
-        right_w[i] = w[j_right]
-
-    # Light smoothing for stable interpolation across rows.
-    kernel = np.array([1.0, 2.0, 3.0, 2.0, 1.0], dtype=np.float32)
-    kernel /= np.sum(kernel)
-
-    def smooth_edge(x):
-        x = np.asarray(x, dtype=np.float32)
-        x_pad = np.pad(x, (2, 2), mode="edge")
-        return np.convolve(x_pad, kernel, mode="valid").astype(np.float32)
-
-    return {
-        "v": v_grid,
-        "left_u": smooth_edge(left_u),
-        "right_u": smooth_edge(right_u),
-        "left_w": smooth_edge(left_w),
-        "right_w": smooth_edge(right_w),
-        "left_idx": left_idx,
-        "right_idx": right_idx,
-    }
-
-
-def _extract_depth_profile_at_v_from_uvw(
-    uvw,
-    v_target,
-    n_samples=601,
-    band_fraction=0.08,
-    smooth_fraction=0.03,
-):
-    """
-    Estimate continuous near-positive depth profile at camera-space row v=v_target.
-    """
-    uvw = np.asarray(uvw, dtype=np.float32)
-    u = uvw[:, 0]
-    v = uvw[:, 1]
-    w = uvw[:, 2]
-
-    v_span = max(1e-6, float(np.max(v) - np.min(v)))
-    band = float(band_fraction) * v_span
-    mask = np.abs(v - float(v_target)) <= band
-    if int(np.sum(mask)) < 500:
-        k = min(v.shape[0], max(4000, int(n_samples) * 10))
-        idx = np.argsort(np.abs(v - float(v_target)))[:k]
-        mask = np.zeros_like(v, dtype=bool)
-        mask[idx] = True
-
-    u_sel = u[mask]
-    w_sel = w[mask]
-    order = np.argsort(u_sel)
-    u_sel = u_sel[order]
-    w_sel = w_sel[order]
-
-    u_min = float(np.min(u_sel))
-    u_max = float(np.max(u_sel))
-    u_line = np.linspace(u_min, u_max, int(n_samples), dtype=np.float32)
-
-    sigma = max(1e-6, float(smooth_fraction) * max(1e-6, u_max - u_min))
-    depth_w = np.empty_like(u_line)
-    chunk = 128
-    for i0 in range(0, u_line.shape[0], chunk):
-        i1 = min(i0 + chunk, u_line.shape[0])
-        du = (u_sel[:, None] - u_line[None, i0:i1]) / sigma
-        weights = np.exp(-0.5 * du * du).astype(np.float32)
-        denom = np.sum(weights, axis=0) + 1e-12
-        depth_w[i0:i1] = np.sum(weights * w_sel[:, None], axis=0) / denom
-
-    # Convert camera-space w to near-positive depth (larger = nearer).
-    depth_near = (-depth_w).astype(np.float32)
-    return u_line, depth_near
-
-
-def _task_to_rgb_u8(img):
-    arr = np.asarray(img)
-    if arr.ndim == 2:
-        arr = np.stack([arr, arr, arr], axis=2)
-    if arr.ndim == 3 and arr.shape[2] >= 4:
-        arr = arr[:, :, :3]
-    arr = arr.astype(np.float32)
-    if float(np.max(arr)) <= 1.0:
-        arr = arr * 255.0
-    return np.clip(np.round(arr), 0, 255).astype(np.uint8)
-
-
-def _task_estimate_foreground_mask(img_rgb_u8, diff_threshold=8.0):
-    img = np.asarray(img_rgb_u8, dtype=np.float32)
-    border = np.concatenate(
-        [img[0, :, :], img[-1, :, :], img[:, 0, :], img[:, -1, :]],
-        axis=0,
-    )
-    bg = np.median(border, axis=0).astype(np.float32)
-    diff = np.max(np.abs(img - bg[None, None, :]), axis=2)
-    mask = diff > float(diff_threshold)
-
-    # Light denoise to bridge tiny gaps from texture dots.
-    row_hits = np.convolve(mask.sum(axis=1).astype(np.float32), np.ones(5, dtype=np.float32), mode="same")
-    col_hits = np.convolve(mask.sum(axis=0).astype(np.float32), np.ones(5, dtype=np.float32), mode="same")
-    valid_rows = row_hits > 3.0
-    valid_cols = col_hits > 3.0
-    mask &= valid_rows[:, None]
-    mask &= valid_cols[None, :]
-
-    if not np.any(mask):
-        raise RuntimeError("Could not detect foreground contour from image.")
-    return mask
-
-
-def _task_longest_true_run(row_mask):
-    idx = np.flatnonzero(np.asarray(row_mask, dtype=bool))
-    if idx.size == 0:
-        return None
-    split = np.where(np.diff(idx) > 1)[0]
-    starts = np.r_[idx[0], idx[split + 1]]
-    ends = np.r_[idx[split], idx[-1]]
-    lengths = ends - starts + 1
-    j = int(np.argmax(lengths))
-    return int(starts[j]), int(ends[j]), int(lengths[j])
-
-
-def _task_choose_random_probe_row(mask, rng, y_frac_min=1.0 / 3.0, y_frac_max=2.0 / 3.0, min_span_frac=0.14):
-    h, w = mask.shape
-    y0 = int(np.clip(np.floor(float(y_frac_min) * h), 0, h - 1))
-    y1 = int(np.clip(np.ceil(float(y_frac_max) * h), 0, h - 1))
-    if y1 < y0:
-        y0, y1 = y1, y0
-
-    min_span = max(16, int(round(float(min_span_frac) * w)))
-    ys = np.arange(y0, y1 + 1, dtype=np.int32)
-    ys = ys[rng.permutation(ys.shape[0])]
-
-    best = None
-    for y in ys:
-        row = mask[int(y), :]
-        row_s = np.convolve(row.astype(np.float32), np.ones(5, dtype=np.float32), mode="same") >= 1.0
-        run = _task_longest_true_run(row_s)
-        if run is None:
-            continue
-        x_left, x_right, span = run
-        if span >= min_span:
-            return int(y), int(x_left), int(x_right)
-        if best is None or span > best[2]:
-            best = (int(y), int(x_left), int(x_right), int(span))
-
-    if best is not None:
-        return best[0], best[1], best[2]
-
-    ys_fg, xs_fg = np.where(mask)
-    if xs_fg.size == 0:
-        raise RuntimeError("Failed to find foreground intersections for probe row.")
-    y = int(np.clip(np.median(ys_fg), y0, y1))
-    return y, int(np.min(xs_fg)), int(np.max(xs_fg))
-
-
-def _task_probe_y_fraction_from_image(img_u8, rng_seed=TASK_PROBE_SEED):
-    rgb = _task_to_rgb_u8(img_u8)
-    mask = _task_estimate_foreground_mask(rgb)
-    rng = np.random.default_rng(int(rng_seed))
-    y_px, _x_left_px, _x_right_px = _task_choose_random_probe_row(mask, rng)
-    ys_fg, _ = np.where(mask)
-    fg_top_px = int(np.min(ys_fg))
-    fg_bottom_px = int(np.max(ys_fg))
-    if fg_bottom_px <= fg_top_px:
-        y_frac = 0.5
-    else:
-        y_frac = float((y_px - fg_top_px) / max(1, (fg_bottom_px - fg_top_px)))
-    y_frac = float(np.clip(y_frac, 0.0, 1.0))
-    return {
-        "probe_y_px": int(y_px),
-        "fg_top_px": fg_top_px,
-        "fg_bottom_px": fg_bottom_px,
-        "probe_y_fraction": y_frac,
-    }
-
-
-def _task_build_probe_grid_rows_from_image(
-    img_u8,
-    n_rows=TASK_DEPTH_GRID_ROWS,
-    y_frac_min=1.0 / 3.0,
-    y_frac_max=2.0 / 3.0,
-    min_span_frac=0.14,
-):
-    rgb = _task_to_rgb_u8(img_u8)
-    mask = _task_estimate_foreground_mask(rgb)
-    h, w = mask.shape
-    ys_fg, _ = np.where(mask)
-    fg_top_px = int(np.min(ys_fg))
-    fg_bottom_px = int(np.max(ys_fg))
-
-    y0 = int(np.clip(np.floor(float(y_frac_min) * h), 0, h - 1))
-    y1 = int(np.clip(np.ceil(float(y_frac_max) * h), 0, h - 1))
-    if y1 < y0:
-        y0, y1 = y1, y0
-
-    min_span = max(16, int(round(float(min_span_frac) * w)))
-    candidates = []
-    best = None
-    for y in range(y0, y1 + 1):
-        row = mask[int(y), :]
-        row_s = np.convolve(row.astype(np.float32), np.ones(5, dtype=np.float32), mode="same") >= 1.0
-        run = _task_longest_true_run(row_s)
-        if run is None:
-            continue
-        x_left, x_right, span = run
-        if best is None or span > best[2]:
-            best = (int(y), int(x_left), int(x_right), int(span))
-        if span >= min_span:
-            candidates.append((int(y), int(x_left), int(x_right), int(span)))
-
-    if not candidates:
-        if best is not None:
-            candidates = [best]
-        else:
-            ys_fg, xs_fg = np.where(mask)
-            if xs_fg.size == 0:
-                raise RuntimeError("Failed to build probe-row grid from image.")
-            y = int(np.clip(np.median(ys_fg), y0, y1))
-            candidates = [(y, int(np.min(xs_fg)), int(np.max(xs_fg)), int(np.max(xs_fg) - np.min(xs_fg) + 1))]
-
-    n_take = max(1, min(int(n_rows), len(candidates)))
-    idx_float = np.linspace(0, len(candidates) - 1, n_take, dtype=np.float32)
-    idx_take = np.unique(np.rint(idx_float).astype(np.int32))
-    while idx_take.shape[0] < n_take:
-        idx_take = np.unique(np.r_[idx_take, np.array([idx_take[-1] + 1], dtype=np.int32)])
-        idx_take = idx_take[idx_take < len(candidates)]
-        if idx_take.shape[0] == 0:
-            idx_take = np.array([0], dtype=np.int32)
-            break
-
-    rows = []
-    denom_x = float(max(1, w - 1))
-    for row_index, k in enumerate(idx_take.tolist()):
-        y_px, x_left_px, x_right_px, span = candidates[int(k)]
-        x_left_norm = float(x_left_px / denom_x)
-        x_right_norm = float(x_right_px / denom_x)
-        if x_right_norm <= x_left_norm:
-            x_right_norm = float(min(0.99, x_left_norm + 0.01))
-
-        if fg_bottom_px <= fg_top_px:
-            y_frac = 0.5
-        else:
-            y_frac = float((y_px - fg_top_px) / max(1, (fg_bottom_px - fg_top_px)))
-        y_frac = float(np.clip(y_frac, 0.0, 1.0))
-        x_inner_norm = np.linspace(x_left_norm, x_right_norm, 7, dtype=np.float32)[1:-1]
-        rows.append(
-            {
-                "row_index": int(row_index),
-                "probe_y_px": int(y_px),
-                "fg_top_px": int(fg_top_px),
-                "fg_bottom_px": int(fg_bottom_px),
-                "probe_y_fraction": float(y_frac),
-                "x_left_px": int(x_left_px),
-                "x_right_px": int(x_right_px),
-                "x_left_norm": float(x_left_norm),
-                "x_right_norm": float(x_right_norm),
-                "x_inner_norm": x_inner_norm.astype(np.float32).tolist(),
-                "row_span_px": int(span),
-            }
-        )
-
-    return {
-        "height_px": int(h),
-        "width_px": int(w),
-        "fg_top_px": int(fg_top_px),
-        "fg_bottom_px": int(fg_bottom_px),
-        "rows": rows,
-    }
-
-
-def build_true_depth_grid_metadata(
-    product_img_u8,
-    mesh_shading,
-    mesh_texture,
-    camera,
-    grid_rows=TASK_DEPTH_GRID_ROWS,
-):
-    probe_grid = _task_build_probe_grid_rows_from_image(product_img_u8, n_rows=int(grid_rows))
-    rows_out = []
-    for row in probe_grid["rows"]:
-        depth = compute_true_cross_section_depths(
-            mesh_shading,
-            mesh_texture,
-            camera,
-            n_values=7,
-            probe_y_fraction=float(row["probe_y_fraction"]),
-            x_left_norm=float(row["x_left_norm"]),
-            x_right_norm=float(row["x_right_norm"]),
-            x_inner_norm=row["x_inner_norm"],
-        )
-        rows_out.append(
-            {
-                "row_index": int(row["row_index"]),
-                "probe_y_px": int(row["probe_y_px"]),
-                "probe_y_fraction": float(row["probe_y_fraction"]),
-                "x_left_px": int(row["x_left_px"]),
-                "x_right_px": int(row["x_right_px"]),
-                "x_left_norm": float(row["x_left_norm"]),
-                "x_right_norm": float(row["x_right_norm"]),
-                "x_inner_norm": list(row["x_inner_norm"]),
-                "probe_v": float(depth["probe_v"]),
-                "shading_depth_near_with_anchors": list(depth["shading_depth_near_with_anchors"]),
-                "texture_depth_near_with_anchors": list(depth["texture_depth_near_with_anchors"]),
-            }
-        )
-
-    return {
-        "format": "texture_gen_true_depth_grid_v1",
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "camera": [list(camera[0]), list(camera[1]), list(camera[2])],
-        "task_probe_seed": int(TASK_PROBE_SEED),
-        "depth_grid_rows_requested": int(grid_rows),
-        "depth_grid_rows_built": int(len(rows_out)),
-        "reference_image_height_px": int(probe_grid["height_px"]),
-        "reference_image_width_px": int(probe_grid["width_px"]),
-        "reference_fg_top_px": int(probe_grid["fg_top_px"]),
-        "reference_fg_bottom_px": int(probe_grid["fg_bottom_px"]),
-        "rows": rows_out,
-    }
-
-
-def save_true_depth_grid_metadata(metadata, out_path):
-    out = Path(out_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(metadata, indent=2))
-    return out
-
-
-def compute_true_cross_section_depths(
-    mesh_shading,
-    mesh_texture,
-    camera,
-    n_values=7,
-    probe_y_fraction=0.5,
-    x_left_norm=None,
-    x_right_norm=None,
-    x_inner_norm=None,
-):
-    """
-    Return true shading/texture depth arrays sampled at equally spaced points
-    between left/right contour anchors (inclusive).
-    """
-    uvw_a = _points_to_camera_coords(mesh_shading.points, *camera).astype(np.float32)
-    uvw_b = _points_to_camera_coords(mesh_texture.points, *camera).astype(np.float32)
-
-    v_min = float(min(np.min(uvw_a[:, 1]), np.min(uvw_b[:, 1])))
-    v_max = float(max(np.max(uvw_a[:, 1]), np.max(uvw_b[:, 1])))
-    y_frac = float(np.clip(probe_y_fraction, 0.0, 1.0))
-    # Match midline task mapping: image y grows downward while camera v grows upward.
-    v_target = v_max - y_frac * (v_max - v_min)
-
-    u_a, depth_a = _extract_depth_profile_at_v_from_uvw(uvw_a, v_target=v_target)
-    u_b, depth_b = _extract_depth_profile_at_v_from_uvw(uvw_b, v_target=v_target)
-
-    # If normalized horizontal anchors are provided, match midline_task mapping:
-    # map normalized [left..right] positions to each profile's sampled u range.
-    if x_left_norm is not None and x_right_norm is not None:
-        x_left = float(x_left_norm)
-        x_right = float(x_right_norm)
-        if x_right <= x_left:
-            x_right = x_left + 1e-3
-        if x_inner_norm is None:
-            x_inner = np.linspace(x_left, x_right, int(n_values), dtype=np.float32)[1:-1]
-        else:
-            x_inner = np.asarray(x_inner_norm, dtype=np.float32).reshape(-1)
-        x_with_anchors = np.r_[np.array([x_left], dtype=np.float32), x_inner, np.array([x_right], dtype=np.float32)]
-        t = (x_with_anchors - x_left) / max(1e-12, (x_right - x_left))
-        t = np.clip(t, 0.0, 1.0).astype(np.float32)
-        u_query_a = u_a[0] + t * (u_a[-1] - u_a[0])
-        u_query_b = u_b[0] + t * (u_b[-1] - u_b[0])
-        shading = np.interp(u_query_a, u_a, depth_a).astype(np.float32)
-        texture = np.interp(u_query_b, u_b, depth_b).astype(np.float32)
-    else:
-        edge_a = _edge_depth_profiles_by_v(uvw_a, n_bins=220)
-        left_u = float(np.interp(v_target, edge_a["v"], edge_a["left_u"]))
-        right_u = float(np.interp(v_target, edge_a["v"], edge_a["right_u"]))
-        if right_u <= left_u + 1e-9:
-            left_u = float(min(np.min(uvw_a[:, 0]), np.min(uvw_b[:, 0])))
-            right_u = float(max(np.max(uvw_a[:, 0]), np.max(uvw_b[:, 0])))
-            right_u = max(right_u, left_u + 1e-3)
-        t = np.linspace(0.0, 1.0, int(n_values), dtype=np.float32)
-        u_query = left_u + t * (right_u - left_u)
-        shading = np.interp(u_query, u_a, depth_a).astype(np.float32)
-        texture = np.interp(u_query, u_b, depth_b).astype(np.float32)
-
-    shading = _force_equal_anchor_depths(shading)
-    texture = _force_equal_anchor_depths(texture)
-
-    return {
-        "probe_v": float(v_target),
-        "shading_depth_near_with_anchors": shading.tolist(),
-        "texture_depth_near_with_anchors": texture.tolist(),
-    }
-
-
-def _format_depth_values(values):
-    arr = np.asarray(values, dtype=np.float32).reshape(-1)
-    return "[" + ", ".join(f"{float(v):.6f}" for v in arr.tolist()) + "]"
-
-
-def _force_equal_anchor_depths(depth_values):
-    """
-    Ensure left/right anchor depths are exactly equal by averaging endpoints.
-    """
-    arr = np.asarray(depth_values, dtype=np.float32).reshape(-1)
-    if arr.size >= 2:
-        edge_mean = np.float32(0.5 * (float(arr[0]) + float(arr[-1])))
-        arr[0] = edge_mean
-        arr[-1] = edge_mean
-    return arr
-
-
-def enforce_equal_left_right_edge_depths(mesh, camera, n_v_bins=220):
-    """
-    Modify mesh depth (w) so left/right contour depths match at each camera-space row.
-    Silhouette remains unchanged because only w is edited.
-    """
-    cam_pos, focal, view_up = camera
-    uvw = _points_to_camera_coords(mesh.points, cam_pos, focal, view_up).astype(np.float32)
-    prof = _edge_depth_profiles_by_v(uvw, n_bins=n_v_bins)
-
-    v_ref = prof["v"]
-    desired_w = (0.5 * (prof["left_w"] + prof["right_w"])).astype(np.float32)
-    delta_left = (desired_w - prof["left_w"]).astype(np.float32)
-    delta_right = (desired_w - prof["right_w"]).astype(np.float32)
-
-    u_pts = uvw[:, 0]
-    v_pts = uvw[:, 1]
-    left_u_v = np.interp(v_pts, v_ref, prof["left_u"]).astype(np.float32)
-    right_u_v = np.interp(v_pts, v_ref, prof["right_u"]).astype(np.float32)
-    left_d_v = np.interp(v_pts, v_ref, delta_left).astype(np.float32)
-    right_d_v = np.interp(v_pts, v_ref, delta_right).astype(np.float32)
-
-    denom = np.maximum(1e-6, right_u_v - left_u_v)
-    t = np.clip((u_pts - left_u_v) / denom, 0.0, 1.0).astype(np.float32)
-    delta = ((1.0 - t) * left_d_v + t * right_d_v).astype(np.float32)
-
-    out = uvw.copy()
-    out[:, 2] += delta
-
-    left_idx = np.asarray(prof["left_idx"], dtype=np.int64)
-    right_idx = np.asarray(prof["right_idx"], dtype=np.int64)
-    out[left_idx, 2] = np.interp(out[left_idx, 1], v_ref, desired_w).astype(np.float32)
-    out[right_idx, 2] = np.interp(out[right_idx, 1], v_ref, desired_w).astype(np.float32)
-
-    mesh.points = _camera_coords_to_points(out, cam_pos, focal, view_up)
-    return mesh
-
-
-def enforce_matching_edge_depths(reference_mesh, target_mesh, camera, n_v_bins=220):
-    """
-    Modify target mesh depth (w) so left/right contour depths match reference mesh
-    across camera-space rows. Silhouette remains unchanged because only w is edited.
-    """
-    cam_pos, focal, view_up = camera
-    ref_uvw = _points_to_camera_coords(reference_mesh.points, cam_pos, focal, view_up).astype(np.float32)
-    tgt_uvw = _points_to_camera_coords(target_mesh.points, cam_pos, focal, view_up).astype(np.float32)
-
-    ref_prof = _edge_depth_profiles_by_v(ref_uvw, n_bins=n_v_bins)
-    tgt_prof = _edge_depth_profiles_by_v(tgt_uvw, n_bins=n_v_bins)
-
-    v_ref = ref_prof["v"]
-    v_tgt = tgt_prof["v"]
-    delta_left = ref_prof["left_w"] - np.interp(v_ref, v_tgt, tgt_prof["left_w"]).astype(np.float32)
-    delta_right = ref_prof["right_w"] - np.interp(v_ref, v_tgt, tgt_prof["right_w"]).astype(np.float32)
-
-    u_tgt = tgt_uvw[:, 0]
-    v_tgt_pts = tgt_uvw[:, 1]
-
-    left_u_v = np.interp(v_tgt_pts, v_ref, ref_prof["left_u"]).astype(np.float32)
-    right_u_v = np.interp(v_tgt_pts, v_ref, ref_prof["right_u"]).astype(np.float32)
-    left_d_v = np.interp(v_tgt_pts, v_ref, delta_left).astype(np.float32)
-    right_d_v = np.interp(v_tgt_pts, v_ref, delta_right).astype(np.float32)
-
-    denom = np.maximum(1e-6, right_u_v - left_u_v)
-    t = np.clip((u_tgt - left_u_v) / denom, 0.0, 1.0).astype(np.float32)
-    delta = ((1.0 - t) * left_d_v + t * right_d_v).astype(np.float32)
-
-    out = tgt_uvw.copy()
-    out[:, 2] += delta
-
-    # Hard-pin representative contour points to remove residual numerical mismatch.
-    left_idx = np.asarray(tgt_prof["left_idx"], dtype=np.int64)
-    right_idx = np.asarray(tgt_prof["right_idx"], dtype=np.int64)
-    out[left_idx, 2] = np.interp(out[left_idx, 1], v_ref, ref_prof["left_w"]).astype(np.float32)
-    out[right_idx, 2] = np.interp(out[right_idx, 1], v_ref, ref_prof["right_w"]).astype(np.float32)
-
     target_mesh.points = _camera_coords_to_points(out, cam_pos, focal, view_up)
     return target_mesh
 
@@ -1263,15 +711,6 @@ def make_conflicting_surface_pair(theta_res=300, phi_res=300, fixed_camera=None,
         )
         # Re-enforce silhouette after depth edits (numerical safety).
         surf_b = enforce_same_front_silhouette(surf_a, surf_b, fixed_camera)
-        # Geometric constraint: each surface should have equal left/right contour depth.
-        surf_a = enforce_equal_left_right_edge_depths(surf_a, fixed_camera, n_v_bins=220)
-        surf_b = enforce_equal_left_right_edge_depths(surf_b, fixed_camera, n_v_bins=220)
-        # Geometric constraint: match left/right contour depths between cues so
-        # cross-section anchors are truly equal in the generated surfaces.
-        surf_b = enforce_matching_edge_depths(surf_a, surf_b, fixed_camera, n_v_bins=220)
-        # Re-apply symmetry after cross-cue matching to suppress tiny numerical drift.
-        surf_b = enforce_equal_left_right_edge_depths(surf_b, fixed_camera, n_v_bins=220)
-        surf_b = enforce_same_front_silhouette(surf_a, surf_b, fixed_camera)
 
     if surf_a.n_points != surf_b.n_points:
         raise RuntimeError("Conflicting surfaces must have matching point counts for exact transfer.")
@@ -1396,10 +835,7 @@ def run_panel_render(fixed_view=False, shape_diff_strength=PANEL_SHAPE_DIFF_STRE
         return np.asarray(kept, dtype=np.int64)
 
     def compute_dot_textures(dot_count):
-        k = max(0, int(dot_count))
-        if k == 0:
-            zeros = np.zeros(n_pts, dtype=np.float32)
-            return zeros, zeros.copy()
+        k = max(1, int(dot_count))
         center_idx = sample_random_nonoverlap_center_indices(k, min_center_dist)
         centers_tex = points_texture_snapshot[center_idx]
 
@@ -1518,8 +954,8 @@ def run_panel_render(fixed_view=False, shape_diff_strength=PANEL_SHAPE_DIFF_STRE
     set_panel_camera(2, target_camera)
 
     shading_levels = [("Low", 0.00), ("Med", 0.35), ("High", 0.70)]
-    # Low is true no-texture (zero dots); Med/High preserve cue progression.
-    texture_levels = [("Low", 0), ("Med", 150), ("High", 250)]
+    # Low stays sparse; increase Med->High gap for clearer perceptual difference.
+    texture_levels = [("Low", 50), ("Med", 150), ("High", 250)]
 
     shade_state = {"level_idx": 1, "strength": shading_levels[1][1]}
     tex_state = {"level_idx": 1, "dot_count": texture_levels[1][1]}
@@ -1545,7 +981,6 @@ def run_panel_render(fixed_view=False, shape_diff_strength=PANEL_SHAPE_DIFF_STRE
         idx = int(np.clip(idx, 0, 2))
         shade_state["level_idx"] = idx
         shade_state["strength"] = shading_levels[idx][1]
-        _set_actor_lighting(actor_shading, idx != 0)
         apply_shading_style(actor_shading, lights_shading, shade_state["strength"])
         set_button_group(shade_buttons, idx)
         refresh_textures()
@@ -1723,67 +1158,6 @@ def run_panel_render(fixed_view=False, shape_diff_strength=PANEL_SHAPE_DIFF_STRE
         product = np.round((g1.astype(np.float32) / 255.0) * (g2.astype(np.float32) / 255.0) * 255.0).astype(np.uint8)
         return product
 
-    depth_grid_state = {"metadata": None}
-
-    def ensure_depth_grid_metadata():
-        if depth_grid_state["metadata"] is None:
-            product = capture_panel1_panel2_product_image()
-            meta = build_true_depth_grid_metadata(
-                product,
-                surf_shading,
-                surf_texture,
-                fixed_camera,
-                grid_rows=TASK_DEPTH_GRID_ROWS,
-            )
-            meta["shape_diff_strength"] = float(shape_diff_strength)
-            meta["shading_levels"] = [[name, float(value)] for name, value in shading_levels]
-            meta["texture_levels"] = [[name, int(value)] for name, value in texture_levels]
-            depth_grid_state["metadata"] = meta
-        return depth_grid_state["metadata"]
-
-    def save_startup_depth_grid_files():
-        try:
-            meta = ensure_depth_grid_metadata()
-            out_latest = save_true_depth_grid_metadata(meta, Path("stimuli") / "depth_grid_latest.json")
-            out_stable = save_true_depth_grid_metadata(meta, Path("stimuli") / "depth_grid.json")
-            print(f"Saved true depth grid metadata: {out_stable}")
-            print(f"Updated latest depth grid metadata: {out_latest}")
-        except Exception as exc:
-            print(f"Warning: could not save startup depth grid metadata ({exc}).")
-
-    def print_startup_task_probe_depth_report():
-        try:
-            meta = ensure_depth_grid_metadata()
-            rows = list(meta.get("rows", []))
-            if not rows:
-                raise RuntimeError("Depth grid has zero rows.")
-            rng = np.random.default_rng(TASK_PROBE_SEED)
-            row_idx = int(rng.integers(0, len(rows)))
-            row = rows[row_idx]
-            print(
-                "True shading/texture depth values at startup "
-                "(7 values each, near-positive, includes fixed anchors, "
-                "using one saved depth-grid row):"
-            )
-            print(
-                "  "
-                f"grid_row_index={row_idx}, "
-                f"probe_y_px={int(row['probe_y_px'])}, "
-                f"probe_y_fraction={float(row['probe_y_fraction']):.6f}, "
-                f"probe_seed={TASK_PROBE_SEED}, "
-                f"grid_rows={len(rows)}"
-            )
-            print(
-                f"  shading_depths_7: "
-                f"{_format_depth_values(row['shading_depth_near_with_anchors'])}"
-            )
-            print(
-                f"  texture_depths_7: "
-                f"{_format_depth_values(row['texture_depth_near_with_anchors'])}"
-            )
-        except Exception as exc:
-            print(f"Warning: could not compute startup task-probe depth arrays ({exc}).")
-
     def save_panel12_mult_grid_3x3(auto=False):
         grid_root = Path("stimuli_grid9")
         grid_root.mkdir(parents=True, exist_ok=True)
@@ -1791,13 +1165,6 @@ def run_panel_render(fixed_view=False, shape_diff_strength=PANEL_SHAPE_DIFF_STRE
         run_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_dir = grid_root / f"shape_sd-{float(shape_diff_strength):.2f}_{run_tag}"
         run_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            meta = ensure_depth_grid_metadata()
-            meta_run = json.loads(json.dumps(meta))
-            meta_run["grid_export_dir"] = str(run_dir)
-            save_true_depth_grid_metadata(meta_run, run_dir / "depth_grid.json")
-        except Exception as exc:
-            print(f"Warning: could not save depth grid metadata into {run_dir} ({exc}).")
 
         try:
             from PIL import Image
@@ -1877,8 +1244,6 @@ def run_panel_render(fixed_view=False, shape_diff_strength=PANEL_SHAPE_DIFF_STRE
             print(f"Panel-only save failed ({exc}); saved full screenshot to: {fallback}")
 
     set_sync_views(True)
-    save_startup_depth_grid_files()
-    print_startup_task_probe_depth_report()
     if PANEL_ROTATION_ENABLED:
         if hasattr(plotter, "enable_trackball_style"):
             plotter.enable_trackball_style()

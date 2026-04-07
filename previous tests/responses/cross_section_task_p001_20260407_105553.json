@@ -1,0 +1,33 @@
+{
+  "participant_id": "p001",
+  "task_type": "cross_section_fixed_ends_five_movable",
+  "y_range_ui": [
+    -1.0,
+    1.0
+  ],
+  "responses": [
+    {
+      "participant_id": "p001",
+      "trial_index": 1,
+      "stimulus_file": "CC.png",
+      "probe_y_px": 356,
+      "x_left_px": 69,
+      "x_right_px": 761,
+      "x_left_norm": 0.08635794743429287,
+      "x_right_norm": 0.9524405506883604,
+      "task_x_left_norm": 0.08635794743429287,
+      "task_x_right_norm": 0.9524405506883604,
+      "trial_view_seconds": 8.970750570297241,
+      "x1_norm": 0.23070505261421204,
+      "response1_ui": 0.0,
+      "x2_norm": 0.37505215406417847,
+      "response2_ui": 0.0,
+      "x3_norm": 0.5193992257118225,
+      "response3_ui": 0.0,
+      "x4_norm": 0.6637463569641113,
+      "response4_ui": 0.0,
+      "x5_norm": 0.8080934286117554,
+      "response5_ui": 0.0
+    }
+  ]
+}
