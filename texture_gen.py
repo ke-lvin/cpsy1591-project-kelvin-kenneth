@@ -1303,7 +1303,12 @@ def project_points_to_view(points, cam_pos, focal, view_up):
     return np.stack([u, v], axis=1)
 
 
-def run_panel_render(fixed_view=False, shape_diff_strength=PANEL_SHAPE_DIFF_STRENGTH):
+def run_panel_render(
+    fixed_view=False,
+    shape_diff_strength=PANEL_SHAPE_DIFF_STRENGTH,
+    show_window=True,
+    auto_export=True,
+):
     fixed_camera = [(0.0, 0.0, 3.1), (0.0, 0.0, 0.0), (0.0, 1.0, 0.0)]
     panel_capture_y_shift_px = 80
     panel12_capture_box_margin = 3
@@ -1440,7 +1445,12 @@ def run_panel_render(fixed_view=False, shape_diff_strength=PANEL_SHAPE_DIFF_STRE
     panel3_title = "Texture Only (Shape B, White Base)"
 
     pv.set_plot_theme("document")
-    plotter = pv.Plotter(shape=(1, num_panels), window_size=PANEL_WINDOW_SIZE, border=False)
+    plotter = pv.Plotter(
+        shape=(1, num_panels),
+        window_size=PANEL_WINDOW_SIZE,
+        border=False,
+        off_screen=bool(not show_window),
+    )
     if hasattr(plotter, "enable_anti_aliasing"):
         # SSAA can render scalar-mapped panels black on some VTK/OpenGL stacks.
         try:
@@ -1573,38 +1583,39 @@ def run_panel_render(fixed_view=False, shape_diff_strength=PANEL_SHAPE_DIFF_STRE
 
         return _callback
 
-    # Widgets are viewport-local; anchor coordinates within the right-most panel.
-    plotter.subplot(0, 2)
-    shade_origin = (28, 78)
-    tex_origin = (28, 24)
-    level_dx = 86
-    button_size = 22
+    if show_window:
+        # Widgets are viewport-local; anchor coordinates within the right-most panel.
+        plotter.subplot(0, 2)
+        shade_origin = (28, 78)
+        tex_origin = (28, 24)
+        level_dx = 86
+        button_size = 22
 
-    plotter.add_text("Shading Level", position=(shade_origin[0], shade_origin[1] + 34), font_size=11)
-    for i, (name, _) in enumerate(shading_levels):
-        x = shade_origin[0] + i * level_dx
-        y = shade_origin[1]
-        btn = plotter.add_checkbox_button_widget(
-            callback=make_shading_button_callback(i),
-            value=(i == shade_state["level_idx"]),
-            position=(x, y),
-            size=button_size,
-        )
-        shade_buttons.append(btn)
-        plotter.add_text(name, position=(x + 28, y + 2), font_size=10)
+        plotter.add_text("Shading Level", position=(shade_origin[0], shade_origin[1] + 34), font_size=11)
+        for i, (name, _) in enumerate(shading_levels):
+            x = shade_origin[0] + i * level_dx
+            y = shade_origin[1]
+            btn = plotter.add_checkbox_button_widget(
+                callback=make_shading_button_callback(i),
+                value=(i == shade_state["level_idx"]),
+                position=(x, y),
+                size=button_size,
+            )
+            shade_buttons.append(btn)
+            plotter.add_text(name, position=(x + 28, y + 2), font_size=10)
 
-    plotter.add_text("Texture Level", position=(tex_origin[0], tex_origin[1] + 34), font_size=11)
-    for i, (name, _) in enumerate(texture_levels):
-        x = tex_origin[0] + i * level_dx
-        y = tex_origin[1]
-        btn = plotter.add_checkbox_button_widget(
-            callback=make_texture_button_callback(i),
-            value=(i == tex_state["level_idx"]),
-            position=(x, y),
-            size=button_size,
-        )
-        tex_buttons.append(btn)
-        plotter.add_text(name, position=(x + 28, y + 2), font_size=10)
+        plotter.add_text("Texture Level", position=(tex_origin[0], tex_origin[1] + 34), font_size=11)
+        for i, (name, _) in enumerate(texture_levels):
+            x = tex_origin[0] + i * level_dx
+            y = tex_origin[1]
+            btn = plotter.add_checkbox_button_widget(
+                callback=make_texture_button_callback(i),
+                value=(i == tex_state["level_idx"]),
+                position=(x, y),
+                size=button_size,
+            )
+            tex_buttons.append(btn)
+            plotter.add_text(name, position=(x + 28, y + 2), font_size=10)
 
     set_shading_level_idx(shade_state["level_idx"])
     set_texture_level_idx(tex_state["level_idx"])
@@ -1630,23 +1641,24 @@ def run_panel_render(fixed_view=False, shape_diff_strength=PANEL_SHAPE_DIFF_STRE
     def on_reset_click(_flag):
         reset_views()
 
-    plotter.subplot(0, 2)
-    plotter.add_checkbox_button_widget(
-        callback=set_sync_views,
-        value=True,
-        position=(30, 182),
-        size=26,
-    )
-    plotter.add_text("Sync Views", position=(65, 184), font_size=11)
+    if show_window:
+        plotter.subplot(0, 2)
+        plotter.add_checkbox_button_widget(
+            callback=set_sync_views,
+            value=True,
+            position=(30, 182),
+            size=26,
+        )
+        plotter.add_text("Sync Views", position=(65, 184), font_size=11)
 
-    plotter.add_checkbox_button_widget(
-        callback=on_reset_click,
-        value=False,
-        position=(30, 138),
-        size=26,
-    )
-    plotter.add_text("Reset Views", position=(65, 140), font_size=11)
-    plotter.add_key_event("r", reset_views)
+        plotter.add_checkbox_button_widget(
+            callback=on_reset_click,
+            value=False,
+            position=(30, 138),
+            size=26,
+        )
+        plotter.add_text("Reset Views", position=(65, 140), font_size=11)
+        plotter.add_key_event("r", reset_views)
 
     def _foreground_center_and_square(panel_rgb, ignore_bottom_frac=1.0, box_margin=1.12):
         ph, pw = panel_rgb.shape[:2]
@@ -1789,7 +1801,12 @@ def run_panel_render(fixed_view=False, shape_diff_strength=PANEL_SHAPE_DIFF_STRE
         grid_root.mkdir(parents=True, exist_ok=True)
 
         run_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_dir = grid_root / f"shape_sd-{float(shape_diff_strength):.2f}_{run_tag}"
+        run_base = grid_root / f"shape_sd-{float(shape_diff_strength):.2f}_{run_tag}"
+        run_dir = run_base
+        suffix = 2
+        while run_dir.exists():
+            run_dir = grid_root / f"{run_base.name}_{suffix}"
+            suffix += 1
         run_dir.mkdir(parents=True, exist_ok=True)
         try:
             meta = ensure_depth_grid_metadata()
@@ -1812,9 +1829,9 @@ def run_panel_render(fixed_view=False, shape_diff_strength=PANEL_SHAPE_DIFF_STRE
 
         saved = []
         try:
-            for s_idx, (shade_name, shade_strength) in enumerate(shading_levels):
+            for s_idx, _ in enumerate(shading_levels):
                 set_shading_level_idx(s_idx)
-                for t_idx, (tex_name, tex_count) in enumerate(texture_levels):
+                for t_idx, _ in enumerate(texture_levels):
                     set_texture_level_idx(t_idx)
                     product = capture_panel1_panel2_product_image()
                     code = f"{level_codes[s_idx]}{level_codes[t_idx]}"
@@ -1879,43 +1896,51 @@ def run_panel_render(fixed_view=False, shape_diff_strength=PANEL_SHAPE_DIFF_STRE
     set_sync_views(True)
     save_startup_depth_grid_files()
     print_startup_task_probe_depth_report()
-    if PANEL_ROTATION_ENABLED:
-        if hasattr(plotter, "enable_trackball_style"):
-            plotter.enable_trackball_style()
+    if show_window:
+        if PANEL_ROTATION_ENABLED:
+            if hasattr(plotter, "enable_trackball_style"):
+                plotter.enable_trackball_style()
+        else:
+            if hasattr(plotter, "enable_image_style"):
+                plotter.enable_image_style()
+
+        # Press "s" to save full panel screenshot.
+        # Press "p" to save right-most panel only into ./stimuli with level info in filename.
+        out = "shape_shading_texture_comparison.png"
+        plotter.add_key_event("s", lambda: plotter.screenshot(out))
+        plotter.add_key_event("p", save_rightmost_panel_stimulus)
+        plotter.add_key_event("m", lambda: save_panel12_mult_grid_3x3(auto=False))
+
+        if auto_export:
+            auto_capture_state = {"done": False}
+
+            def _auto_capture_once(_step=None):
+                if auto_capture_state["done"]:
+                    return
+                auto_capture_state["done"] = True
+                try:
+                    save_panel12_mult_grid_3x3(auto=True)
+                except Exception as exc:
+                    # Keep the app usable even if timer/render timing varies by backend.
+                    auto_capture_state["done"] = False
+                    print(f'Auto-save after launch was not ready ({exc}). Press "m" once the window is visible.')
+
+            if hasattr(plotter, "add_timer_event"):
+                try:
+                    plotter.add_timer_event(max_steps=1, duration=250, callback=_auto_capture_once)
+                except Exception as exc:
+                    print(f'Could not schedule auto panel capture ({exc}). Press "m" to save manually.')
+            else:
+                print('Auto panel capture timer unavailable in this backend. Press "m" to save manually.')
+
+        print(f'Interactive panel ready. Press "s" for full screenshot: {out}')
+        print('Press "p" to save right-most panel stimulus into ./stimuli.')
+        print('Press "m" to save 3x3 multiplied images (shading x texture) into ./stimuli_grid9.')
+        plotter.show()
     else:
-        if hasattr(plotter, "enable_image_style"):
-            plotter.enable_image_style()
-
-    # Press "s" to save full panel screenshot.
-    # Press "p" to save right-most panel only into ./stimuli with level info in filename.
-    out = "shape_shading_texture_comparison.png"
-    plotter.add_key_event("s", lambda: plotter.screenshot(out))
-    plotter.add_key_event("p", save_rightmost_panel_stimulus)
-    plotter.add_key_event("m", lambda: save_panel12_mult_grid_3x3(auto=False))
-    auto_capture_state = {"done": False}
-
-    def _auto_capture_once(_step=None):
-        if auto_capture_state["done"]:
-            return
-        auto_capture_state["done"] = True
-        try:
+        if auto_export:
             save_panel12_mult_grid_3x3(auto=True)
-        except Exception as exc:
-            # Keep the app usable even if timer/render timing varies by backend.
-            auto_capture_state["done"] = False
-            print(f'Auto-save after launch was not ready ({exc}). Press "m" once the window is visible.')
-
-    if hasattr(plotter, "add_timer_event"):
-        try:
-            plotter.add_timer_event(max_steps=1, duration=250, callback=_auto_capture_once)
-        except Exception as exc:
-            print(f'Could not schedule auto panel capture ({exc}). Press "m" to save manually.')
-    else:
-        print('Auto panel capture timer unavailable in this backend. Press "m" to save manually.')
-    print(f'Interactive panel ready. Press "s" for full screenshot: {out}')
-    print('Press "p" to save right-most panel stimulus into ./stimuli.')
-    print('Press "m" to save 3x3 multiplied images (shading x texture) into ./stimuli_grid9.')
-    plotter.show()
+        plotter.close()
 
 
 def run_interactive_view():
@@ -2008,10 +2033,36 @@ def main():
             "0.0=similar, 1.0=clear difference, >1.0=stronger."
         ),
     )
+    parser.add_argument(
+        "--n-shapes",
+        type=int,
+        default=1,
+        help=(
+            "Number of different shapes to generate in --panel mode. "
+            "Each shape exports a full 3x3 set (9 images)."
+        ),
+    )
     args = parser.parse_args()
 
     if args.panel:
-        run_panel_render(fixed_view=args.fixed_view, shape_diff_strength=args.shape_diff)
+        n_shapes = max(1, int(args.n_shapes))
+        if n_shapes == 1:
+            run_panel_render(
+                fixed_view=args.fixed_view,
+                shape_diff_strength=args.shape_diff,
+                show_window=True,
+                auto_export=True,
+            )
+        else:
+            for i in range(n_shapes):
+                print(f"[{i + 1}/{n_shapes}] Generating shape and exporting 3x3 stimuli...")
+                run_panel_render(
+                    fixed_view=args.fixed_view,
+                    shape_diff_strength=args.shape_diff,
+                    show_window=False,
+                    auto_export=True,
+                )
+            print(f"Completed batch generation for {n_shapes} shape(s).")
     else:
         run_interactive_view()
 

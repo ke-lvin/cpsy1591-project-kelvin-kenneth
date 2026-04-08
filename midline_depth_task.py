@@ -913,7 +913,10 @@ def build_cross_section_trial_from_depth_grid_row(stimulus_path, depth_grid_row,
 def build_cross_section_trial_from_depth_grid(stimulus_path, rng, depth_grid_rows, trial_meta=None):
     if not depth_grid_rows:
         raise RuntimeError("Depth grid has no rows.")
-    idx = int(rng.integers(0, len(depth_grid_rows)))
+    candidate_idx = _row_indices_in_fraction_window(depth_grid_rows, lo=1.0 / 3.0, hi=2.0 / 3.0)
+    if candidate_idx.size == 0:
+        candidate_idx = np.arange(len(depth_grid_rows), dtype=np.int32)
+    idx = int(candidate_idx[int(rng.integers(0, candidate_idx.size))])
     return build_cross_section_trial_from_depth_grid_row(
         stimulus_path=stimulus_path,
         depth_grid_row=depth_grid_rows[idx],
@@ -975,6 +978,25 @@ def _arrange_trials_no_adjacent_duplicates(trials, key_fn, rng=None, randomize=T
                 tie = float(rng.random()) if (rng is not None and randomize) else 0.0
                 heapq.heappush(heap, (count1, tie, key1))
     return out
+
+
+def _row_indices_in_fraction_window(rows, lo=1.0 / 3.0, hi=2.0 / 3.0):
+    """
+    Return row indices whose probe_y_fraction is in [lo, hi].
+    Falls back to finite rows, then all rows if needed.
+    """
+    if not rows:
+        return np.zeros(0, dtype=np.int32)
+    y = np.asarray([float(r.get("probe_y_fraction", float("nan"))) for r in rows], dtype=np.float32)
+    finite = np.isfinite(y)
+    in_win = finite & (y >= float(lo)) & (y <= float(hi))
+    idx = np.flatnonzero(in_win)
+    if idx.size > 0:
+        return idx.astype(np.int32)
+    idx = np.flatnonzero(finite)
+    if idx.size > 0:
+        return idx.astype(np.int32)
+    return np.arange(len(rows), dtype=np.int32)
 
 
 def _validate_two_shape_experiment_trials(
@@ -1089,9 +1111,12 @@ def build_two_shape_experiment_trials(
         shading_levels = payload.get("shading_levels", [])
         texture_levels = payload.get("texture_levels", [])
         rows = depth_grid_data["rows"]
+        in_window_idx = _row_indices_in_fraction_window(rows, lo=1.0 / 3.0, hi=2.0 / 3.0)
+        if in_window_idx.size == 0:
+            raise RuntimeError(f'Depth grid for "{shape_dir}" has no selectable rows.')
 
         # One fixed row per shape, but force different line positions across the two shapes.
-        row_idx = int(rng.integers(0, len(rows)))
+        row_idx = int(in_window_idx[int(rng.integers(0, in_window_idx.size))])
         if selected_shape_probe_y_fracs:
             target_frac = float(selected_shape_probe_y_fracs[0])
             min_sep = 0.06
@@ -1100,8 +1125,7 @@ def build_two_shape_experiment_trials(
                     [float(r.get("probe_y_fraction", float("nan"))) for r in rows],
                     dtype=np.float32,
                 )
-                finite_mask = np.isfinite(y_fracs)
-                valid_idx = np.flatnonzero(finite_mask)
+                valid_idx = in_window_idx[np.isfinite(y_fracs[in_window_idx])]
                 if valid_idx.size > 0:
                     sep = np.abs(y_fracs[valid_idx] - target_frac)
                     good = valid_idx[sep >= float(min_sep)]
@@ -1110,12 +1134,12 @@ def build_two_shape_experiment_trials(
                     else:
                         # If no row clears min_sep, pick the farthest available row.
                         row_idx = int(valid_idx[int(np.argmax(sep))])
-                elif len(rows) > 1:
+                elif in_window_idx.size > 1:
                     # Fallback: at least avoid same row index when fractions are unavailable.
-                    row_idx = int((int(rng.integers(1, len(rows))) + row_idx) % len(rows))
-            elif len(rows) > 1:
+                    row_idx = int(in_window_idx[int(rng.integers(0, in_window_idx.size))])
+            elif in_window_idx.size > 1:
                 # Fallback when shape1 row fraction is invalid.
-                row_idx = int((int(rng.integers(1, len(rows))) + row_idx) % len(rows))
+                row_idx = int(in_window_idx[int(rng.integers(0, in_window_idx.size))])
 
         row = rows[row_idx]
         selected_shape_probe_y_fracs.append(float(row.get("probe_y_fraction", float("nan"))))
@@ -1358,7 +1382,7 @@ class CrossSectionFiveDotTask:
             self.trials = [build_cross_section_trial(p, self.rng) for p in self.stimuli_paths]
 
         self.n_trials = len(self.trials)
-        self.cue_profile_seed = int(seed)
+        self.cue_profile_seed = int(seed) if seed is not None else None
         self.cue_targets = [None for _ in range(self.n_trials)]
         self.cue_targets_available = False
 
@@ -1660,6 +1684,8 @@ class CrossSectionFiveDotTask:
     def _load_trial(self):
         self._draw_image_panel()
         self._style_line_axis()
+        trial = self.trials[self.current]
+        print(f"Trial {self.current + 1}/{self.n_trials}: {trial['path'].name}")
         self.fig.suptitle(
             "Fixed endpoints and movable dots start on the centered line. Drag 5 interior dots.\n"
             "Nearer = higher; farther = lower.",
@@ -1867,7 +1893,7 @@ class CrossSectionFiveDotTask:
             "forward_only": bool(not self.allow_back),
             "experiment_info": self.experiment_info,
             "cue_depth_targets_available": bool(self.cue_targets_available),
-            "cue_depth_seed": int(self.cue_profile_seed),
+            "cue_depth_seed": self.cue_profile_seed if self.cue_profile_seed is not None else None,
             "response_values_are_absolute_depth_near": True,
             "y_range_ui": [self.y_min, self.y_max],
             "y_range_depth_near": [self.y_min, self.y_max],
@@ -1947,7 +1973,7 @@ def main():
     parser.add_argument(
         "--seed",
         type=int,
-        default=1234,
+        default=25,
         help="Seed for Shape A/B geometry (five-dot profiles and cross-section cue-depth targets).",
     )
     parser.add_argument("--n-samples", type=int, default=401, help="Samples in each continuous depth number-line.")
