@@ -1219,38 +1219,36 @@ def make_conflicting_surface_pair(theta_res=300, phi_res=300, fixed_camera=None,
     if fixed_camera is not None:
         surf_b = enforce_same_front_silhouette(surf_a, surf_b, fixed_camera)
         # Add independent in/out depth structure while preserving silhouette.
-        sigma_a_lo = float(np.clip(0.08 + 0.015 * d, 0.07, 0.14))
-        sigma_a_hi = float(np.clip(0.20 + 0.025 * d, sigma_a_lo + 0.04, 0.30))
-        sigma_b_lo = float(np.clip(0.08 + 0.015 * d, 0.07, 0.14))
-        sigma_b_hi = float(np.clip(0.21 + 0.025 * d, sigma_b_lo + 0.04, 0.31))
+        sigma_a_lo = float(np.clip(0.10 + 0.02 * d, 0.09, 0.18))
+        sigma_a_hi = float(np.clip(0.24 + 0.03 * d, sigma_a_lo + 0.05, 0.36))
+        sigma_b_lo = float(np.clip(0.10 + 0.02 * d, 0.09, 0.18))
+        sigma_b_hi = float(np.clip(0.25 + 0.03 * d, sigma_b_lo + 0.05, 0.38))
         offset_a = rng.uniform(-0.16, 0.16, size=2).astype(np.float32)
         offset_b = rng.uniform(-0.16, 0.16, size=2).astype(np.float32)
         if np.linalg.norm(offset_a - offset_b) < 0.12:
             offset_b = np.clip(-offset_a + rng.uniform(-0.05, 0.05, size=2), -0.22, 0.22).astype(np.float32)
-        center_a = float(rng.uniform(-0.08, 0.08) * (0.45 + 0.85 * d))
-        center_b = float(rng.uniform(-0.08, 0.08) * (0.45 + 0.85 * d))
+        center_a = float(rng.uniform(-0.06, 0.06) * (0.35 + 0.60 * d))
+        center_b = float(rng.uniform(-0.06, 0.06) * (0.35 + 0.60 * d))
         surf_a = add_depth_bumps_in_view(
             surf_a,
             fixed_camera,
             seed=seed_depth_a,
-            n_bumps=int(np.clip(round(2.8 * (24 + 12 * d)), 40, 176)),
-            amp=0.52 + 0.34 * d,
+            n_bumps=int(np.clip(round(2.0 * (20 + 10 * d)), 24, 108)),
+            amp=0.36 + 0.24 * d,
             sigma_range=(sigma_a_lo, sigma_a_hi),
             center_bulge=center_a,
-            # Depth-only displacement keeps front contour stable.
-            lateral_strength=0.0,
+            lateral_strength=0.22 + 0.10 * d,
             center_offset=(float(offset_a[0]), float(offset_a[1])),
         )
         surf_b = add_depth_bumps_in_view(
             surf_b,
             fixed_camera,
             seed=seed_depth_b,
-            n_bumps=int(np.clip(round(2.9 * (26 + 12 * d)), 44, 184)),
-            amp=0.54 + 0.36 * d,
+            n_bumps=int(np.clip(round(2.0 * (22 + 10 * d)), 24, 112)),
+            amp=0.36 + 0.26 * d,
             sigma_range=(sigma_b_lo, sigma_b_hi),
             center_bulge=center_b,
-            # Depth-only displacement keeps front contour stable.
-            lateral_strength=0.0,
+            lateral_strength=0.22 + 0.11 * d,
             center_offset=(float(offset_b[0]), float(offset_b[1])),
         )
         surf_a = surf_a.smooth(
