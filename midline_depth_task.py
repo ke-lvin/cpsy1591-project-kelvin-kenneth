@@ -1699,7 +1699,7 @@ class CrossSectionFiveDotTask:
         self.trial_view_seconds[self.current] += dt
 
     def _set_current_dot_y(self, idx, y):
-        y_clipped = float(np.clip(y, self.y_min, self.y_max))
+        y_clipped = float(np.clip(float(y), self.y_min, self.y_max))
         self.responses_ui[self.current, idx] = y_clipped
         self.response_line.set_data(self.current_x, self.responses_ui[self.current, :])
         self.fig.canvas.draw_idle()
@@ -1707,9 +1707,10 @@ class CrossSectionFiveDotTask:
     def _pick_dot_index_from_event_x(self, event, max_px=20.0):
         if event.inaxes != self.ax_line or event.x is None:
             return None
+        event_x = float(event.x)
         pts = np.column_stack([self.current_x, self.responses_ui[self.current, :]])
         x_px = self.ax_line.transData.transform(pts)[:, 0]
-        dx = np.abs(x_px - float(event.x))
+        dx = np.abs(x_px - event_x)
         idx = int(np.argmin(dx))
         if float(dx[idx]) <= float(max_px):
             return idx
