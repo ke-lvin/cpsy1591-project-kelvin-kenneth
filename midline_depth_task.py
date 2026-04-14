@@ -1974,7 +1974,7 @@ def main():
     parser.add_argument(
         "--seed",
         type=int,
-        default=25,
+        default=259,
         help="Seed for Shape A/B geometry (five-dot profiles and cross-section cue-depth targets).",
     )
     parser.add_argument("--n-samples", type=int, default=401, help="Samples in each continuous depth number-line.")
